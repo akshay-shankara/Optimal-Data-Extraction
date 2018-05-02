@@ -82,4 +82,4 @@ labelsAndPredictions = test.map(lambda lp: lp.label).zip(predictions)
 # Obtain the accuracy
 test_accuracy = labelsAndPredictions.filter(
     lambda lp: lp[0] == lp[1]).count() / float(test.count())
-print('Test Error = ' + str(test_accuracy))
+str(test_accuracy)
