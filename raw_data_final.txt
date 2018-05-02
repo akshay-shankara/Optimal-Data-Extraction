@@ -1,0 +1,9 @@
+						Number of Features
+Decision Tree			376
+Logistic Regression		412
+	
+
+	
+						Accuracy
+Decision Tree			0.272022065
+Logistic Regression		0.226573916
