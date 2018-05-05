@@ -1,12 +1,16 @@
 package genetic_algorithm;
 
 import java.io.BufferedReader;
-
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Random;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileStatus;
@@ -14,11 +18,12 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.*;
 import org.apache.hadoop.io.SequenceFile.CompressionType;
+import org.apache.hadoop.io.SequenceFile.Reader.Option;
 import org.apache.hadoop.mapred.*;
 import org.apache.hadoop.mapred.lib.IdentityReducer;
+import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
-import org.apache.spark.launcher.SparkLauncher;
 
 @SuppressWarnings("deprecation")
 public class MapReduce extends Configured implements Tool {
@@ -65,18 +70,7 @@ public class MapReduce extends Configured implements Tool {
 		public void configure(JobConf job) {
 			conf = job;
 			mapTaskId = job.get("mapred.task.id");
-			pop = Integer.parseInt(job.get("ga.populationPerMapper"));
-		}
-
-		// Perform spark job to obtain decision tree
-		float getFitness(IntWritable[] individual) throws IOException, InterruptedException {
-			SparkLauncher s = new SparkLauncher().setSparkHome("/usr/local/spark").setAppResource("./decision_tree.py")
-					.setMaster("yarn-cluster").addAppArgs(new IntArrayWritable(individual).toString());
-			Process process = s.launch();
-			process.waitFor();
-			InputStreamReader output_stream = new InputStreamReader(process.getInputStream());
-			BufferedReader reader = new BufferedReader(output_stream);
-			return Float.parseFloat(reader.readLine());
+			// pop = Integer.parseInt(job.get("ga.populationPerMapper"));
 		}
 
 		int processedInd = 0;
@@ -84,33 +78,28 @@ public class MapReduce extends Configured implements Tool {
 		public void map(IntArrayWritable key, FloatWritable value, OutputCollector<IntArrayWritable, FloatWritable> oc,
 				Reporter rep) throws IOException {
 
-			IntWritable[] individual = key.getArray();
+			if (value.get() != 0) {
+				IntWritable[] individual = key.getArray();
+				fit = value.get();
+				// Keep track of the maximum fitness
+				if (fit > max_fitness) {
+					max_fitness = fit;
+					max_individual = new IntArrayWritable(individual);
+				}
 
-			// Compute the fitness for every individual
-			try {
-				fit = getFitness(individual);
-			} catch (InterruptedException e) {
-				e.printStackTrace();
-			}
+				// Write the Individual and fitness value
+				oc.collect(key, new FloatWritable(fit));
 
-			// Keep track of the maximum fitness
-			if (fit > max_fitness) {
-				max_fitness = fit;
-				max_individual = new IntArrayWritable(individual);
-			}
-
-			// Write the Individual and fitness value
-			oc.collect(key, new FloatWritable(fit));
-
-			processedInd++;
-			if (processedInd == pop) {
-				closeAndWrite();
+				processedInd++;
+				if (processedInd >= 10) {
+					closeAndWrite();
+				}
 			}
 		}
 
 		public void closeAndWrite() throws IOException {
 			// At the end of Map(), write the best found individual to a file
-			Path tmpDir = new Path("/mdandam/GA");
+			Path tmpDir = new Path("/akshank/GA");
 			Path outDir = new Path(tmpDir, "global-map");
 
 			// HDFS does not allow multiple mappers to write to the same file,
@@ -150,7 +139,7 @@ public class MapReduce extends Configured implements Tool {
 		public void configure(JobConf jc) {
 			num_of_features = Integer.parseInt(jc.get("ga.number_of_features"));
 			tournamentInd = new IntWritable[2 * tournamentSize][num_of_features];
-			pop = Integer.parseInt(jc.get("ga.populationPerMapper"));
+			// pop = Integer.parseInt(jc.get("ga.populationPerMapper"));
 		}
 
 		void crossover() {
@@ -224,13 +213,12 @@ public class MapReduce extends Configured implements Tool {
 				}
 				processedIndividuals++;
 			}
-			if (processedIndividuals == pop - 1) {
+			if (processedIndividuals > 9) {
 				closeAndWrite();
 			}
 		}
 
 		public void closeAndWrite() {
-			System.out.println("Closing reducer");
 			// Cleanup for the last window of tournament
 			for (int k = 0; k < tournamentSize; k++) {
 				// Conduct a tournament over the past window
@@ -270,13 +258,16 @@ public class MapReduce extends Configured implements Tool {
 		}
 	}
 
-	void launch(int numMaps, int numReducers, String jt, String dfs, int pop)
+	void launch(int numMaps, int numReducers, String jt, String dfs, String algorithm)
 			throws IOException, InterruptedException, URISyntaxException {
 		int num_of_features = 760;
 		int it = 0;
-		int m = 0;
-		while (m < 3) {
-			m++;
+		File output_file = new File("output.txt");
+		BufferedWriter outputWriter = new BufferedWriter(new FileWriter(output_file));
+		outputWriter.append("Start\n");
+		outputWriter.flush();
+		ArrayList<String> fitnesses = new ArrayList<String>();
+		while (true) {
 			JobConf jobConf = new JobConf(getConf(), MapReduce.class);
 			// Set the Job properties
 			jobConf.setSpeculativeExecution(true);
@@ -298,7 +289,7 @@ public class MapReduce extends Configured implements Tool {
 			System.out.println("launching");
 
 			// Declare the directories
-			Path tmpDir = new Path("/mdandam/GA");
+			Path tmpDir = new Path("/akshank/GA");
 			Path inDir = new Path(tmpDir, "iter" + it);
 			Path outDir = new Path(tmpDir, "iter" + (it + 1));
 			FileInputFormat.setInputPaths(jobConf, inDir);
@@ -310,7 +301,7 @@ public class MapReduce extends Configured implements Tool {
 			} catch (IOException e1) {
 				e1.printStackTrace();
 			}
-			int populationPerMapper = pop / numMaps;
+			int populationPerMapper = 5 / numMaps;
 			jobConf.set("ga.populationPerMapper", populationPerMapper + "");
 
 			if (it == 0) {
@@ -338,12 +329,11 @@ public class MapReduce extends Configured implements Tool {
 					IntWritable[] individual = new IntWritable[1];
 					individual[0] = new IntWritable(populationPerMapper);
 					try {
-						writer.append(new IntArrayWritable(individual), new FloatWritable(populationPerMapper));
+						writer.append(new IntArrayWritable(individual), new FloatWritable(0));
 					} catch (Exception e) {
 						System.out.println("Exception while appending to writer");
 						e.printStackTrace();
 					}
-
 					try {
 						writer.close();
 					} catch (Exception e) {
@@ -357,7 +347,72 @@ public class MapReduce extends Configured implements Tool {
 				jobConf.setNumReduceTasks(0);
 			} // End of if it == 0 (end of initialization)
 			else {
+				System.out.println("\n\n\nITERATION " + it + " started\n\n\n");
+				for (int i = 0; i < numMaps; ++i) {
+					Option filePath = SequenceFile.Reader.file(new Path(inDir, "part-" + String.format("%05d", i)));
+					SequenceFile.Reader sequenceFileReader = null;
+					try {
+						sequenceFileReader = new SequenceFile.Reader(jobConf, filePath);
+					} catch (java.io.FileNotFoundException e) {
+						break;
+					}
+					IntArrayWritable key = (IntArrayWritable) ReflectionUtils
+							.newInstance(sequenceFileReader.getKeyClass(), jobConf);
+					FloatWritable value = (FloatWritable) ReflectionUtils
+							.newInstance(sequenceFileReader.getValueClass(), jobConf);
 
+					Path file = new Path(inDir, "part-" + String.format("%05d", i));
+					SequenceFile.Writer writer = SequenceFile.createWriter(fileSys, jobConf, file,
+							IntArrayWritable.class, FloatWritable.class, CompressionType.NONE);
+
+					ArrayList<IntArrayWritable> array = new ArrayList<IntArrayWritable>();
+
+					while (sequenceFileReader.next(key, value)) {
+						if (it != 1) {
+							if (value.get() != 0) {
+								array.add(key);
+							}
+						} else {
+							array.add(key);
+						}
+						key = (IntArrayWritable) ReflectionUtils.newInstance(sequenceFileReader.getKeyClass(), jobConf);
+						value = (FloatWritable) ReflectionUtils.newInstance(sequenceFileReader.getValueClass(),
+								jobConf);
+					}
+					for (int j = 0; j < array.size(); j++) {
+						if (array.get(j).toString().indexOf("1") == -1) {
+							continue;
+						}
+						ProcessBuilder pb = null;
+						if (algorithm.startsWith("d")) {
+							pb = new ProcessBuilder("spark-submit", "./decision_tree.py", array.get(j).toString());
+						}
+						if (algorithm.startsWith("l")) {
+							pb = new ProcessBuilder("spark-submit", "./logistic.py", array.get(j).toString());
+						}
+						pb.redirectErrorStream(true);
+						Process process = pb.start();
+						InputStreamReader output_stream = new InputStreamReader(process.getInputStream());
+						BufferedReader reader = new BufferedReader(output_stream);
+						String line = null;
+						String fitness = "";
+						while ((line = reader.readLine()) != null) {
+							if (line.startsWith("0.")) {
+								fitness = line;
+							}
+						}
+						process.waitFor();
+						System.out
+								.println("\nIndividual = " + array.get(j).toString() + "\nFitness = " + fitness + "\n");
+						try {
+							writer.append(array.get(j), new FloatWritable(Float.parseFloat(fitness)));
+						} catch (NumberFormatException e) {
+							continue;
+						}
+					}
+					sequenceFileReader.close();
+					writer.close();
+				}
 				jobConf.setMapperClass(GAMapper.class);
 				try {
 					fileSys.delete(outDir, true);
@@ -367,25 +422,20 @@ public class MapReduce extends Configured implements Tool {
 					ie.printStackTrace();
 				}
 			}
-
-			System.out.println("Starting Job");
-
 			try {
 				JobClient.runJob(jobConf);
 			} catch (IOException e) {
 				System.out.println("Exception while running job");
 				e.printStackTrace();
 			}
-			System.out.println("Job done for: " + jobConf.getMapperClass());
 			if (it != 0) {
-
 				// End of a Genetic algorithm phase
 				FloatWritable max = new FloatWritable();
 				IntArrayWritable maxInd = new IntArrayWritable();
 				FloatWritable finalMax = new FloatWritable(-1);
 				IntArrayWritable finalInd = null;
 
-				Path global = new Path(tmpDir, "/mdandam/GA/global-map");
+				Path global = new Path(tmpDir, "global-map");
 
 				FileStatus[] fs = null;
 				SequenceFile.Reader reader = null;
@@ -423,13 +473,26 @@ public class MapReduce extends Configured implements Tool {
 						e.printStackTrace();
 					}
 				}
-				System.out.println(
-						"\n\nMaximum individual = " + finalInd + "\n" + "Maximum Fitness = " + finalMax + "\n\n\n");
+				System.out.println("\n\nIteration = " + it + "\nFinal Individual - " + finalInd + "\n" + "Accuracy = "
+						+ finalMax + "\n\n\n");
+				fitnesses.add(finalMax + "");
+				outputWriter.write("\n\nIteration = " + it + "\nFinal Individual - " + finalInd + "\n" + "Accuracy = "
+						+ finalMax + "\n\n\n");
+				outputWriter.flush();
 			}
 			it++;
-
-			if (it > numMaps) {
-				break;
+			if (it == 15) {
+				String max = fitnesses.get(fitnesses.size() - 1);
+				if (max.contentEquals(fitnesses.get(fitnesses.size() - 2))) {
+					if (max.contentEquals(fitnesses.get(fitnesses.size() - 3))) {
+						if (max.contentEquals(fitnesses.get(fitnesses.size() - 4))) {
+							if (max.contentEquals(fitnesses.get(fitnesses.size() - 5))) {
+								outputWriter.close();
+								break;
+							}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -439,7 +502,7 @@ public class MapReduce extends Configured implements Tool {
 	 */
 	public int run(String[] args) throws Exception {
 		if (args.length != 3) {
-			System.err.println("Usage: GeneticMR <nMaps> <nReducers> <population>");
+			System.err.println("Usage: GeneticMR <nMaps> <nReducers> <algorithm>");
 			ToolRunner.printGenericCommandUsage(System.err);
 			return -1;
 		}
@@ -447,11 +510,9 @@ public class MapReduce extends Configured implements Tool {
 		// Set the command-line parameters
 		int nMaps = Integer.parseInt(args[0]);
 		int nReducers = Integer.parseInt(args[1]);
-		int pop = Integer.parseInt(args[2]);
+		String algorithm = args[2];
 
-		System.out.println("Number of Maps = " + nMaps);
-
-		launch(nMaps, nReducers, null, null, pop);
+		launch(nMaps, nReducers, null, null, algorithm);
 
 		return 0;
 	}
